@@ -1,20 +1,27 @@
 #=================================================
-# https://github.com/danxiaonuo/hugo-docker
+# https://github.com/iflyelf/hugo-docker
 # Lisence: MIT
-# Author: danxiaonuo
-# Blog: https://www.danxiaonuo.com
+# Author: iflyelf
+# Blog: https://www.xiaonuo.live
 #=================================================
 
-name: 自动编译hugo并上传镜像
+name: 自动编译并上传镜像
+
+# 镜像推送目标（华为云 SWR: 国内可访问, 替代 docker.io）
+# 组织名称可直接修改, 凭据通过 Secrets: SWR_USERNAME / SWR_PASSWORD
+env:
+  SWR_REGISTRY: swr.cn-east-3.myhuaweicloud.com
+  SWR_ORGANIZATION: iflyelf
 
 # 设置触发条件
 on:
-  # 仓库触发工作流
-  # repository_dispatch:
   # 编辑文件触发开始编译
   push:
     paths:
       - 'Dockerfile'
+      - 'conf/**'
+      - 'entrypoint.sh'
+      - '.github/workflows/docker-publish.yml'
   # 手动触发工作流
   workflow_dispatch:
     inputs:
@@ -22,76 +29,188 @@ on:
         description: 'build hugo'
         required: true
         default: 'build hugo'
-  # 定时触发编译(每天早5点)
+  # 定时触发编译(中国时间每天早5点, UTC 前一天21点)
   schedule:
-     - cron: '0 21 * * *'
+    - cron: '0 21 * * *'
   # 点☆Star触发开始编译
-  watch:  
+  watch:
      types: [started]
-     
+
+# 同一分支仅保留最新一次构建：快速连续提交时自动取消旧构建，
+# 避免多个多架构（QEMU）构建并发堆积、互相拖慢导致镜像迟迟不更新。
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: true
+
  # 任务集
 jobs:
   build:
     # 选择虚拟环境
     runs-on: ubuntu-latest
-    if: github.event.repository.owner.id == github.event.sender.id
+    if: github.event_name == 'schedule' || github.event.repository.owner.id == github.event.sender.id
     strategy:
       fail-fast: false
       matrix:
         include:
           - DOCKER_TAG: latest
-    
+
+    # 权限
+    permissions:
+      actions: write
+      contents: read
+
     # 运行步骤
     steps:
-    
+
     # 检出master分支
     - name: 检出各个模块代码
-      uses: actions/checkout@v2
+      uses: actions/checkout@v4
       with:
         fetch-depth: 0
 
+    # 获取最新 Hugo 版本号
+    - name: 获取 Hugo 最新版本
+      id: hugo_version
+      run: |
+        HUGO_VERSION=$(curl -s https://api.github.com/repos/gohugoio/hugo/releases/latest | jq -r .tag_name | sed 's/^v//')
+        echo "version=${HUGO_VERSION}" >> $GITHUB_OUTPUT
+        echo "Hugo 最新版本: ${HUGO_VERSION}"
+
     - name: 安装 QEMU
-      uses: docker/setup-qemu-action@v1
+      uses: docker/setup-qemu-action@v3
       with:
         platforms: all
 
     - name: 安装 docker buildx
       id: buildx
-      uses: docker/setup-buildx-action@v1
+      uses: docker/setup-buildx-action@v3
       with:
         version: latest
 
     - name: 登录 DockerHub
-      uses: docker/login-action@v1
+      uses: docker/login-action@v3
       with:
-        username: danxiaonuo
+        username: ${{ secrets.DOCKER_USERNAME }}
         password: ${{ secrets.DOCKER_PASSWORD }}
-  
+
+    - name: 登录华为云 SWR
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.SWR_REGISTRY }}
+        username: ${{ secrets.SWR_USERNAME }}
+        password: ${{ secrets.SWR_PASSWORD }}
+
     - name: 构建镜像并发布
-      uses: docker/build-push-action@v2
+      uses: docker/build-push-action@v6
+      # 华为云 SWR 不支持 OCI media types 与证明清单(attestation)，
+      # 否则报 "Invalid image, fail to parse 'manifest.json'"。
+      # 关闭 provenance/sbom 并输出 Docker 媒体类型以兼容 SWR。
       with:
         context: .
         file: ./Dockerfile
-        platforms: linux/amd64,linux/arm/v7,linux/arm64,linux/386
+        platforms: linux/amd64,linux/arm64
         push: true
-        tags: danxiaonuo/hugo:${{ matrix.DOCKER_TAG }}
+        provenance: false
+        sbom: false
+        outputs: type=image,oci-mediatypes=false
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/hugo:${{ matrix.DOCKER_TAG }}
+          ${{ secrets.DOCKER_USERNAME }}/hugo:${{ steps.hugo_version.outputs.version }}
+          ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/hugo:${{ matrix.DOCKER_TAG }}
+          ${{ env.SWR_REGISTRY }}/${{ env.SWR_ORGANIZATION }}/hugo:${{ steps.hugo_version.outputs.version }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    # 华为云 SWR 镜像仓库默认私有，push 后调用 SWR API 设为公开
+    # 需 Secrets: SWR_AK / SWR_SK（华为云账号 AK/SK，具备 swr:repo:updateRepo 权限）
+    - name: 设置 SWR 镜像为公开
+      env:
+        CLOUD_SDK_AK: ${{ secrets.SWR_AK }}
+        CLOUD_SDK_SK: ${{ secrets.SWR_SK }}
+        SWR_REGION: cn-east-3
+        SWR_ORGANIZATION: ${{ env.SWR_ORGANIZATION }}
+      run: |
+        if [ -z "$CLOUD_SDK_AK" ] || [ -z "$CLOUD_SDK_SK" ]; then
+          echo "未配置 SWR_AK / SWR_SK，跳过设置公开"
+          exit 0
+        fi
+        pip install --quiet huaweicloudsdkcore huaweicloudsdkswr
+        python - <<'PY'
+        import os
+        from huaweicloudsdkcore.auth.credentials import BasicCredentials
+        from huaweicloudsdkswr.v2.region.swr_region import SwrRegion
+        from huaweicloudsdkswr.v2 import SwrClient
+        from huaweicloudsdkswr.v2.model import UpdateRepoRequest, UpdateRepoRequestBody
+
+        client = SwrClient.new_builder() \
+            .with_credentials(BasicCredentials(os.environ["CLOUD_SDK_AK"], os.environ["CLOUD_SDK_SK"])) \
+            .with_region(SwrRegion.value_of(os.environ["SWR_REGION"])) \
+            .build()
+
+        namespace = os.environ["SWR_ORGANIZATION"]
+        for repository in ["hugo"]:
+            req = UpdateRepoRequest()
+            req.namespace = namespace
+            req.repository = repository
+            req.body = UpdateRepoRequestBody(is_public=True)
+            client.update_repo(req)
+            print(f"✅ 已设为公开: {namespace}/{repository}")
+        PY
+
+    # 更新 README 版本信息
+    - name: 更新 README.md
+      run: |
+        HUGO_VERSION="${{ steps.hugo_version.outputs.version }}"
+        BUILD_DATE=$(date -u +"%Y-%m-%d")
         
-    - name: 上传至阿里云
-      id: buildAndPushImage
-      uses: risfeng/docker-image-build-push-action@v1.0
-      with:
-        registry_url: 'registry.cn-hongkong.aliyuncs.com'
-        namespaces: 'danxiaonuo'
-        repository_name: 'hugo'
-        user_name: ${{ secrets.ALIYUN_USERNAME }}
-        password: ${{ secrets.ALIYUN_PASSWORD }}
-        image_version: ${{ matrix.DOCKER_TAG }}
-        docker_file: '.'
+        cat > README.md <<EOF
+        # hugo-docker
         
-      
+        基于 Hugo 的 Docker 镜像，支持多架构构建。
+        
+        ## 镜像信息
+        
+        - **当前 Hugo 版本**: \`${HUGO_VERSION}\`
+        - **构建日期**: \`${BUILD_DATE}\`
+        - **支持架构**: linux/amd64, linux/arm64
+        
+        ## 镜像仓库
+        
+        - Docker Hub: \`iflyelf/hugo:latest\` 或 \`iflyelf/hugo:${HUGO_VERSION}\`
+        - 华为云 SWR: \`swr.cn-east-3.myhuaweicloud.com/iflyelf/hugo:latest\`
+        
+        ## 使用方法
+        
+        \`\`\`bash
+        docker pull iflyelf/hugo:latest
+        docker-compose up -d
+        \`\`\`
+        
+        ## 环境变量
+        
+        - \`HUGO_NEWSITE\`: 是否创建新站点 (默认: false)
+        - \`HUGO_WATCH\`: 是否监听文件变化 (默认: false)
+        - \`HUGO_PUB\`: 是否发布静态文件 (默认: true)
+        - \`HUGO_THEME\`: Hugo 主题 (默认: FixIt)
+        - \`HUGO_PATH\`: 站点路径 (默认: /blog)
+        - \`HUGO_DESTINATION\`: 输出路径 (默认: /src)
+        - \`HUGO_BASEURL\`: 站点 URL (默认: http://www.xiaonuo.live)
+        - \`HUGO_PORT\`: 监听端口 (默认: 80)
+        
+        ## 许可证
+        
+        MIT License
+        EOF
+        
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git add README.md
+        git diff --quiet && git diff --staged --quiet || git commit -m "docs: 更新 Hugo 版本至 ${HUGO_VERSION}"
+        git push || echo "无需推送更新"
+
     - name: 删除旧的GitHub-workflow
       uses: Mattraks/delete-workflow-runs@main
       with:
         repository: ${{ github.repository }}
         retain_days: 1
-        keep_minimum_runs: 1    #保留多少个workflow不删除
+        keep_minimum_runs: 3    #保留多少个workflow不删除

@@ -13,7 +13,7 @@ HUGO_PATH="${HUGO_PATH:=/blog}"
 # HUGO输出静态文件路径
 HUGO_DESTINATION="${HUGO_DESTINATION:=/src}"
 # HUGO访问站点地址
-HUGO_BASEURL="${HUGO_BASEURL:=http://www.danxiaonuo.me}"
+HUGO_BASEURL="${HUGO_BASEURL:=http://www.xiaonuo.live}"
 # HUGO监听地址
 HUGO_BIND="${HUGO_BIND:=::}"
 # HUGO监听端口

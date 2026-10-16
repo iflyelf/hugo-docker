@@ -12,7 +12,7 @@ services:
     # 指定容器名称
     container_name: hugo
     # 指定为镜像名称或镜像ID
-    image: danxiaonuo/hugo:latest
+    image: iflyelf/hugo:latest
     # 覆盖容器启动后默认执行的命令
     # command: /sbin/init
     # 允许容器中运行一些特权命令
@@ -51,7 +51,7 @@ services:
       # HUGO主题模板
       - HUGO_THEME=FixIt
       # HUGO访问站点地址
-      - HUGO_BASEURL=http://www.danxiaonuo.me
+      - HUGO_BASEURL=http://www.xiaonuo.live
       # HUGO监听端口
       - HUGO_PORT=80
     # 指定设备映射关系
@@ -83,7 +83,7 @@ services:
     # 指定容器名称
     container_name: nginx
     # 指定为镜像名称或镜像ID
-    image: danxiaonuo/nginx:latest
+    image: iflyelf/nginx:latest
     # 覆盖容器启动后默认执行的命令
     # command: /sbin/init
     # 允许容器中运行一些特权命令
