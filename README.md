@@ -1,25 +1,38 @@
 # hugo-docker
 
-基于 Hugo 的 Docker 镜像，支持多架构构建。
-
-## 镜像信息
-
-- **基础镜像**: iflyelf/ubuntu:latest (构建阶段) + iflyelf/ubuntu:lite (运行阶段)
-- **支持架构**: linux/amd64, linux/arm64
-- **自动更新**: 每日自动构建最新 Hugo 版本
+基于 Hugo Extended + Dart Sass 的 Docker 镜像，多阶段构建，支持 linux/amd64、linux/arm64。
 
 ## 镜像仓库
 
-- Docker Hub: `iflyelf/hugo:latest`
-- 华为云 SWR: `swr.cn-east-3.myhuaweicloud.com/iflyelf/hugo:latest`
+| 仓库 | 地址 |
+|------|------|
+| Docker Hub | `iflyelf/hugo:latest` / `iflyelf/hugo:<hugo版本>` |
+| 华为云 SWR | `swr.cn-east-3.myhuaweicloud.com/iflyelf/hugo:latest` |
+
+## 多阶段构建
+
+| 阶段 | 基础镜像 | 说明 |
+|------|----------|------|
+| builder | `iflyelf/ubuntu:latest` | 已预装 Node / 工具链，按目标架构下载 hugo、dart-sass，安装 PWA 依赖 |
+| runtime | `iflyelf/ubuntu:lite` | 仅拷贝产物，并安装运行所需依赖（libstdc++6、nodejs、npm、python3、sudo） |
+
+产物位置：
+
+- `hugo` → `/usr/bin/hugo`
+- `dart-sass` → `/opt/dart-sass`（已加入 `PATH`）
+- PWA 依赖（workbox-build、gulp 等）→ `/blog/node_modules`
+
+## 版本管理
+
+Hugo 与 Dart Sass 版本固定在 `Dockerfile` 的 `ARG HUGO_VERSION` / `ARG SASS_VERSION` 中：
+
+- `update-version.yml`：每天 UTC 20:00 通过 GitHub API 检查最新稳定 release，有更新时自动提交 `Dockerfile` 并触发镜像构建
+- `docker-publish.yml`：每天 UTC 21:00 定时构建，同时在 `Dockerfile` / `entrypoint.sh` 变更时触发；同一分支只保留最新一次构建
 
 ## 使用方法
 
 ```bash
-# 拉取镜像
 docker pull iflyelf/hugo:latest
-
-# 使用 docker-compose 启动
 docker-compose up -d
 ```
 
@@ -34,28 +47,17 @@ docker-compose up -d
 | `HUGO_PATH` | 站点路径 | `/blog` |
 | `HUGO_DESTINATION` | 输出路径 | `/src` |
 | `HUGO_BASEURL` | 站点 URL | `http://www.xiaonuo.live` |
+| `HUGO_BIND` | 监听地址 | `::` |
 | `HUGO_PORT` | 监听端口 | `80` |
 
-## 多阶段构建
+## GitHub Secrets
 
-本镜像采用多阶段构建优化：
-
-1. **构建阶段** (`iflyelf/ubuntu:latest`): 包含完整工具链，用于编译 Hugo、Sass 等
-2. **运行阶段** (`iflyelf/ubuntu:lite`): 仅包含运行时依赖，镜像更小更安全
-
-## 功能特性
-
-- ✅ 自动获取最新 Hugo Extended 版本
-- ✅ 内置 Dart Sass 支持
-- ✅ PWA 相关工具支持 (workbox, gulp)
-- ✅ 支持多架构构建 (amd64, arm64)
-- ✅ 定时自动构建并推送至 Docker Hub 和华为云 SWR
-- ✅ 自动更新版本标签
+| 名称 | 用途 |
+|------|------|
+| `DOCKER_USERNAME` / `DOCKER_PASSWORD` | Docker Hub 登录 |
+| `SWR_USERNAME` / `SWR_PASSWORD` | 华为云 SWR 登录 |
+| `SWR_AK` / `SWR_SK` | 推送后将 SWR 仓库设为公开（可选） |
 
 ## 许可证
 
 MIT License
-
-## 作者
-
-iflyelf - https://www.xiaonuo.live

@@ -1,34 +1,30 @@
-#############################
-#     构建阶段               #
-#############################
+#############################################################################
+#  hugo 多阶段构建
+#  - builder(构建阶段) = iflyelf/ubuntu:latest : 已预装 curl/jq/wget/tar/Node,
+#      在构建平台上按目标架构下载 hugo / dart-sass, 并安装 PWA 依赖
+#  - runtime(运行阶段) = iflyelf/ubuntu:lite : 仅拷贝产物 + 安装运行所需依赖
+#  版本号由 .github/workflows/update-version.yml 自动更新(GitHub API 最新稳定版)
+#############################################################################
+
+####################################################################
+#               构建阶段 (builder) = ubuntu:latest                  #
+####################################################################
 FROM --platform=$BUILDPLATFORM iflyelf/ubuntu:latest AS builder
 
-# 作者描述信息
-MAINTAINER iflyelf
-# 时区设置
-ARG TZ=Asia/Shanghai
-ENV TZ=$TZ
-# 语言设置
-ARG LANG=zh_CN.UTF-8
-ENV LANG=$LANG
+LABEL org.opencontainers.image.authors="iflyelf" \
+      org.opencontainers.image.vendor="iflyelf"
 
-# 镜像变量
-ARG DOCKER_IMAGE=iflyelf/hugo
-ENV DOCKER_IMAGE=$DOCKER_IMAGE
-ARG DOCKER_IMAGE_OS=ubuntu
-ENV DOCKER_IMAGE_OS=$DOCKER_IMAGE_OS
-ARG DOCKER_IMAGE_TAG=jammy
-ENV DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG
+# buildx 自动注入的目标架构
+ARG TARGETARCH
+
+# hugo 版本(自动更新)
+ARG HUGO_VERSION=0.168.0
+# dart-sass 版本(自动更新)
+ARG SASS_VERSION=1.105.2
 
 # HUGO站点路径
 ARG HUGO_PATH=/blog
 ENV HUGO_PATH=$HUGO_PATH
-# HUGO输出静态文件路径
-ARG HUGO_DESTINATION=/src
-ENV HUGO_DESTINATION=$HUGO_DESTINATION
-# HUGO监听端口
-ARG HUGO_PORT=80
-ENV HUGO_PORT=$HUGO_PORT
 
 # PWA依赖包
 ARG PWA_DEPS="\
@@ -39,36 +35,39 @@ ARG PWA_DEPS="\
     uglify-es"
 ENV PWA_DEPS=$PWA_DEPS
 
-# 构建阶段：安装 HUGO
+# ***** 按目标架构下载 hugo(extended) 与 dart-sass *****
 RUN set -eux && \
-    export HUGO_DOWN=$(curl -s https://api.github.com/repos/gohugoio/hugo/releases |jq -r .[].assets[].browser_download_url| grep -i 'extended'| grep -i 'Linux-64bit.tar.gz'|head -n 1) && \
-    wget --no-check-certificate -O - $HUGO_DOWN | tar -xz -C /tmp && \
-    mv /tmp/hugo /usr/local/bin/hugo && \
-    chmod +x /usr/local/bin/hugo && \
+    case "${TARGETARCH}" in \
+        amd64) HUGO_ARCH="linux-amd64"; SASS_ARCH="linux-x64" ;; \
+        arm64) HUGO_ARCH="linux-arm64"; SASS_ARCH="linux-arm64" ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    mkdir -p /out/bin /tmp/hugo && \
+    wget -q -O - "https://github.com/gohugoio/hugo/releases/download/v${HUGO_VERSION}/hugo_extended_${HUGO_VERSION}_${HUGO_ARCH}.tar.gz" \
+        | tar -xz -C /tmp/hugo && \
+    install -m 0755 /tmp/hugo/hugo /out/bin/hugo && \
+    # dart-sass 包结构: dart-sass/sass(启动脚本) + dart-sass/src/{dart,sass.snapshot}
+    wget -q -O - "https://github.com/sass/dart-sass/releases/download/${SASS_VERSION}/dart-sass-${SASS_VERSION}-${SASS_ARCH}.tar.gz" \
+        | tar -xz -C /out && \
+    chmod +x /out/dart-sass/sass /out/dart-sass/src/dart && \
     rm -rf /tmp/*
 
-# 构建阶段：安装 SASS
-RUN set -eux && \
-    export SASS_DOWN=$(curl -s https://api.github.com/repos/sass/dart-sass/releases | jq -r .[].assets[].browser_download_url | grep -i 'linux-x64.tar.gz'| head -n 1) && \
-    wget --no-check-certificate -O - $SASS_DOWN | tar -xz -C /tmp && \
-    cp -rfp /tmp/dart-sass/* /usr/local/bin/ && \
-    chmod +x /usr/local/bin/sass && \
-    rm -rf /tmp/*
-
-# 工作目录
+# ***** 安装 PWA 依赖(纯 JS 包, 与架构无关) *****
 WORKDIR ${HUGO_PATH}
-
-# 构建阶段：安装 PWA 依赖
 RUN set -eux && \
-    npm install $PWA_DEPS --save-dev && npm update
+    npm install $PWA_DEPS --save-dev && \
+    npm cache clean --force
 
-#############################
-#     运行阶段               #
-#############################
+
+####################################################################
+#              运行阶段 (runtime) = ubuntu:lite                     #
+####################################################################
 FROM iflyelf/ubuntu:lite AS runtime
 
-# 作者描述信息
-MAINTAINER iflyelf
+LABEL org.opencontainers.image.authors="iflyelf" \
+      org.opencontainers.image.vendor="iflyelf" \
+      org.opencontainers.image.description="hugo(extended) + dart-sass, runtime on ubuntu:lite"
+
 # 时区设置
 ARG TZ=Asia/Shanghai
 ENV TZ=$TZ
@@ -76,13 +75,13 @@ ENV TZ=$TZ
 ARG LANG=zh_CN.UTF-8
 ENV LANG=$LANG
 
+# 环境设置
+ARG DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=$DEBIAN_FRONTEND
+
 # 镜像变量
 ARG DOCKER_IMAGE=iflyelf/hugo
 ENV DOCKER_IMAGE=$DOCKER_IMAGE
-ARG DOCKER_IMAGE_OS=ubuntu
-ENV DOCKER_IMAGE_OS=$DOCKER_IMAGE_OS
-ARG DOCKER_IMAGE_TAG=jammy
-ENV DOCKER_IMAGE_TAG=$DOCKER_IMAGE_TAG
 
 # HUGO站点路径
 ARG HUGO_PATH=/blog
@@ -94,74 +93,71 @@ ENV HUGO_DESTINATION=$HUGO_DESTINATION
 ARG HUGO_PORT=80
 ENV HUGO_PORT=$HUGO_PORT
 
-# 运行时依赖包（按需精简）
+# dart-sass 进 PATH; PWA 依赖的可执行文件进 PATH
+ENV PATH=/opt/dart-sass:${HUGO_PATH}/node_modules/.bin:$PATH
+
+# ***** 运行阶段按需依赖 *****
+# ubuntu:lite 已含 git/curl/wget/ca-certificates/tzdata/locales/tini
+# libstdc++6  -> hugo extended(CGO, libsass/webp) 运行库
+# nodejs npm  -> PWA(workbox/gulp) 与 hugo 调用 postcss 等 npm 工具
+# python3     -> 兼容原镜像的脚本能力
+# sudo        -> entrypoint.sh 中使用
 ARG RUNTIME_DEPS="\
-    ca-certificates \
-    git \
-    curl \
-    wget \
+    libstdc++6 \
     nodejs \
     npm \
     python3 \
     python3-pip \
-    sudo \
-    tzdata \
-    locales"
+    sudo"
 ENV RUNTIME_DEPS=$RUNTIME_DEPS
 
-# 安装运行时依赖
+# ***** 安装运行依赖 *****
 RUN set -eux && \
-   # 更新源地址
-   sed -i s@http://*.*ubuntu.com@https://mirrors.aliyun.com@g /etc/apt/sources.list && \
-   sed -i 's?# deb-src?deb-src?g' /etc/apt/sources.list && \
-   # 解决证书认证失败问题
-   touch /etc/apt/apt.conf.d/99verify-peer.conf && echo >>/etc/apt/apt.conf.d/99verify-peer.conf "Acquire { https::Verify-Peer false }" && \
-   # 更新系统软件
    DEBIAN_FRONTEND=noninteractive apt-get update -qqy && apt-get upgrade -qqy && \
-   # 安装依赖包
-   DEBIAN_FRONTEND=noninteractive apt-get install -qqy --no-install-recommends $RUNTIME_DEPS && \
-   DEBIAN_FRONTEND=noninteractive apt-get -qqy --no-install-recommends autoremove --purge && \
-   DEBIAN_FRONTEND=noninteractive apt-get -qqy --no-install-recommends autoclean && \
-   rm -rf /var/lib/apt/lists/* && \
+   DEBIAN_FRONTEND=noninteractive apt-get install -qqy --no-install-recommends $RUNTIME_DEPS --option=Dpkg::Options::=--force-confdef && \
+   # 验证依赖包是否真正安装成功(逐个检查 dpkg 状态, 缺失则构建失败)
+   for pkg in $RUNTIME_DEPS; do \
+       if ! dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q "install ok installed"; then \
+           echo "ERROR: 运行依赖未成功安装: $pkg" >&2 && exit 1; \
+       fi; \
+   done && \
+   echo "运行依赖验证通过" && \
+   # pip / npm 国内镜像源(系统 Python 受 PEP 668 保护, 允许全局安装)
+   python3 -m pip config set global.break-system-packages true && \
+   python3 -m pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/ && \
+   npm config set registry https://registry.npmmirror.com && \
+   DEBIAN_FRONTEND=noninteractive apt-get -qqy autoremove --purge && \
+   DEBIAN_FRONTEND=noninteractive apt-get -qqy autoclean && \
+   rm -rf /var/lib/apt/lists/* /var/cache/apt/* /tmp/* /root/.cache && \
    # 更新时区
    ln -sf /usr/share/zoneinfo/${TZ} /etc/localtime && \
-   # 更新时间
-   echo ${TZ} > /etc/timezone && \
-   # 配置语言
-   locale-gen zh_CN.UTF-8 && localedef -f UTF-8 -i zh_CN zh_CN.UTF-8 && locale-gen
+   echo ${TZ} > /etc/timezone
 
-# 从构建阶段复制编译产物
-COPY --from=builder /usr/local/bin/hugo /usr/bin/hugo
-COPY --from=builder /usr/local/bin/sass /usr/local/bin/sass
-COPY --from=builder /usr/local/bin/dart /usr/local/bin/dart
-COPY --from=builder /usr/local/bin/src /usr/local/bin/src
+# ***** 拷贝编译产物 *****
+COPY --from=builder /out/bin/hugo /usr/bin/hugo
+COPY --from=builder /out/dart-sass /opt/dart-sass
 COPY --from=builder ${HUGO_PATH}/node_modules ${HUGO_PATH}/node_modules
+COPY --from=builder ${HUGO_PATH}/package.json ${HUGO_PATH}/package.json
 
-# 配置 Python pip
+# ***** 入口脚本 *****
+COPY ["./entrypoint.sh", "/entrypoint.sh"]
+
+# ***** 授权 + smoke test *****
 RUN set -eux && \
-    pip3 config set global.index-url http://mirrors.aliyun.com/pypi/simple/ && \
-    pip3 config set install.trusted-host mirrors.aliyun.com && \
-    pip3 install --no-cache-dir --upgrade pip setuptools wheel && \
-    rm -rf /root/.cache
+    chmod +x /entrypoint.sh /usr/bin/hugo && \
+    hugo version && \
+    sass --version && \
+    node --version
 
-# 设置HUGO环境变量
-ENV PATH /usr/bin/hugo:$PATH
-
-# 工作目录
+# ***** 工作目录 *****
 WORKDIR ${HUGO_PATH}
 
-# 挂载目录
+# ***** 挂载目录 *****
 VOLUME ${HUGO_PATH}
 VOLUME ${HUGO_DESTINATION}
 
-# 增加文件
-ADD entrypoint.sh /entrypoint.sh
-
-# 增加文件权限
-RUN chmod +x /entrypoint.sh /usr/bin/hugo
-
-# 命令执行入口
-ENTRYPOINT ["/entrypoint.sh"]
-
-# 暴露端口
+# ***** 暴露端口 *****
 EXPOSE ${HUGO_PORT}
+
+# ***** 入口(tini 作为 init, 优雅处理信号) *****
+ENTRYPOINT ["/usr/bin/tini", "--", "/entrypoint.sh"]
