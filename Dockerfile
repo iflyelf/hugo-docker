@@ -18,7 +18,7 @@ LABEL org.opencontainers.image.authors="iflyelf" \
 ARG TARGETARCH
 
 # hugo 版本(自动更新)
-ARG HUGO_VERSION=0.168.0
+ARG HUGO_VERSION=0.169.0
 # dart-sass 版本(自动更新)
 ARG SASS_VERSION=1.106.1
 
