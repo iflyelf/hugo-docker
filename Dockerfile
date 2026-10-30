@@ -20,7 +20,7 @@ ARG TARGETARCH
 # hugo 版本(自动更新)
 ARG HUGO_VERSION=0.169.0
 # dart-sass 版本(自动更新)
-ARG SASS_VERSION=1.107.0
+ARG SASS_VERSION=1.107.1
 
 # HUGO站点路径
 ARG HUGO_PATH=/blog
